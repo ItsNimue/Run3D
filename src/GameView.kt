@@ -5,9 +5,9 @@ import android.opengl.GLSurfaceView
 import android.view.MotionEvent
 import kotlin.math.abs
 
-class GameView(ctx: Context, onHud: (Int, Int, Int, Int) -> Unit) : GLSurfaceView(ctx) {
+class GameView(ctx: Context, sound: Sound, onHud: (Hud) -> Unit) : GLSurfaceView(ctx) {
 
-    private val game = Game(ctx, onHud)
+    private val game = Game(ctx, sound, onHud)
     private var downX = 0f
     private var downY = 0f
     private var fired = false
@@ -18,6 +18,10 @@ class GameView(ctx: Context, onHud: (Int, Int, Int, Int) -> Unit) : GLSurfaceVie
         setRenderer(GameRenderer(game))
         renderMode = RENDERMODE_CONTINUOUSLY
     }
+
+    fun start() = queueEvent { game.start() }
+    fun menu() = queueEvent { game.toMenu() }
+    fun shop(i: Int) = queueEvent { game.shopAction(i) }
 
     override fun onTouchEvent(e: MotionEvent): Boolean {
         when (e.actionMasked) {
@@ -40,7 +44,6 @@ class GameView(ctx: Context, onHud: (Int, Int, Int, Int) -> Unit) : GLSurfaceVie
                     queueEvent { game.swipe(dir) }
                 }
             }
-            MotionEvent.ACTION_UP -> if (!fired) queueEvent { game.tap() }
         }
         return true
     }
