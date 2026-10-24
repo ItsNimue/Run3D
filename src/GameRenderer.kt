@@ -13,33 +13,27 @@ import kotlin.math.sin
 
 class GameRenderer(private val game: Game) : GLSurfaceView.Renderer {
 
-    private fun col(r: Int, g: Int, b: Int) = floatArrayOf(r / 255f, g / 255f, b / 255f)
-
-    private val SKY = col(140, 205, 242)
-    private val C_ROAD_A = col(92, 96, 108)
-    private val C_ROAD_B = col(104, 108, 120)
-    private val C_LINE = col(235, 235, 235)
-    private val C_GRASS = col(96, 168, 80)
-    private val C_TRUNK = col(110, 76, 48)
-    private val C_LEAF_A = col(52, 140, 70)
-    private val C_LEAF_B = col(78, 170, 86)
-    private val C_CRATE = col(176, 112, 56)
-    private val C_CRATE_TOP = col(214, 150, 80)
-    private val C_POST = col(70, 70, 80)
-    private val C_BAR = col(220, 60, 60)
-    private val C_WHITE = col(245, 245, 245)
-    private val C_WALL = col(90, 110, 150)
-    private val C_WALL_TOP = col(130, 150, 190)
-    private val C_GOLD = col(255, 200, 40)
-    private val C_SHADOW = col(60, 66, 76)
-
-    private val C_SKIN = col(244, 196, 152)
-    private val C_SHIRT = col(50, 130, 240)
-    private val C_PANTS = col(52, 56, 96)
-    private val C_SHOE = col(245, 245, 245)
-    private val C_HAIR = col(40, 28, 22)
-    private val C_BAND = col(230, 50, 60)
-    private val C_PACK = col(245, 120, 40)
+    private val SKY = rgb(140, 205, 242)
+    private val C_ROAD_A = rgb(92, 96, 108)
+    private val C_ROAD_B = rgb(104, 108, 120)
+    private val C_LINE = rgb(235, 235, 235)
+    private val C_GRASS = rgb(96, 168, 80)
+    private val C_TRUNK = rgb(110, 76, 48)
+    private val C_LEAF_A = rgb(52, 140, 70)
+    private val C_LEAF_B = rgb(78, 170, 86)
+    private val C_CRATE = rgb(176, 112, 56)
+    private val C_CRATE_TOP = rgb(214, 150, 80)
+    private val C_POST = rgb(70, 70, 80)
+    private val C_BAR = rgb(220, 60, 60)
+    private val C_WHITE = rgb(245, 245, 245)
+    private val C_WALL = rgb(90, 110, 150)
+    private val C_WALL_TOP = rgb(130, 150, 190)
+    private val C_GOLD = rgb(255, 200, 40)
+    private val C_SHADOW = rgb(60, 66, 76)
+    private val C_MAG = rgb(230, 50, 60)
+    private val C_SHIELD = rgb(40, 140, 255)
+    private val C_SHIELD_L = rgb(130, 210, 255)
+    private val C_X2 = rgb(150, 70, 230)
 
     private val vertexSrc = """
         uniform mat4 uMVP;
@@ -61,9 +55,10 @@ class GameRenderer(private val game: Game) : GLSurfaceView.Renderer {
 
     private val fragmentSrc = """
         precision mediump float;
+        uniform float uAlpha;
         varying vec3 vColor;
         void main() {
-            gl_FragColor = vec4(vColor, 1.0);
+            gl_FragColor = vec4(vColor, uAlpha);
         }
     """.trimIndent()
 
@@ -74,6 +69,7 @@ class GameRenderer(private val game: Game) : GLSurfaceView.Renderer {
     private var uModel = 0
     private var uColor = 0
     private var uFog = 0
+    private var uAlpha = 0
 
     private lateinit var cube: FloatBuffer
 
@@ -84,13 +80,15 @@ class GameRenderer(private val game: Game) : GLSurfaceView.Renderer {
     private val mvp = FloatArray(16)
     private val I = FloatArray(16).also { Matrix.setIdentityM(it, 0) }
     private val playerBase = FloatArray(16)
+    private val pickBase = FloatArray(16)
 
     private var last = 0L
 
-    // -------------------------------------------------------------- GL setup
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
         GLES20.glClearColor(SKY[0], SKY[1], SKY[2], 1f)
         GLES20.glEnable(GLES20.GL_DEPTH_TEST)
+        GLES20.glEnable(GLES20.GL_BLEND)
+        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
 
         val vs = compile(GLES20.GL_VERTEX_SHADER, vertexSrc)
         val fs = compile(GLES20.GL_FRAGMENT_SHADER, fragmentSrc)
@@ -106,6 +104,7 @@ class GameRenderer(private val game: Game) : GLSurfaceView.Renderer {
         uModel = GLES20.glGetUniformLocation(prog, "uModel")
         uColor = GLES20.glGetUniformLocation(prog, "uColor")
         uFog = GLES20.glGetUniformLocation(prog, "uFog")
+        uAlpha = GLES20.glGetUniformLocation(prog, "uAlpha")
 
         GLES20.glEnableVertexAttribArray(aPos)
         GLES20.glEnableVertexAttribArray(aNormal)
@@ -155,13 +154,13 @@ class GameRenderer(private val game: Game) : GLSurfaceView.Renderer {
         return fb
     }
 
-    // ------------------------------------------------------------ drawing
-    /** model = base * T(p) * Ry * Rx * T(o) * S : ඔක්කොම දේවල් මේකෙන් අඳිනවා (cube එකක්) */
+    /** model = base * T(p) * Ry * Rx * T(o) * S */
     private fun part(
         base: FloatArray, c: FloatArray, sx: Float, sy: Float, sz: Float,
         px: Float = 0f, py: Float = 0f, pz: Float = 0f,
         rx: Float = 0f, ry: Float = 0f,
-        ox: Float = 0f, oy: Float = 0f, oz: Float = 0f
+        ox: Float = 0f, oy: Float = 0f, oz: Float = 0f,
+        a: Float = 1f
     ) {
         System.arraycopy(base, 0, model, 0, 16)
         Matrix.translateM(model, 0, px, py, pz)
@@ -173,6 +172,7 @@ class GameRenderer(private val game: Game) : GLSurfaceView.Renderer {
         GLES20.glUniformMatrix4fv(uMVP, 1, false, mvp, 0)
         GLES20.glUniformMatrix4fv(uModel, 1, false, model, 0)
         GLES20.glUniform3f(uColor, c[0], c[1], c[2])
+        GLES20.glUniform1f(uAlpha, a)
         GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, 36)
     }
 
@@ -192,8 +192,13 @@ class GameRenderer(private val game: Game) : GLSurfaceView.Renderer {
         cube.position(3)
         GLES20.glVertexAttribPointer(aNormal, 3, GLES20.GL_FLOAT, false, 24, cube)
 
-        val cx = game.px * 0.45f
-        Matrix.setLookAtM(view, 0, cx, 4.8f, 10f, cx, 1.2f, -6f, 0f, 1f, 0f)
+        // menu එකේදී camera එක character ළඟට එනවා
+        val m = game.menuT
+        val cx = game.px * 0.45f * (1f - m)
+        val ey = 4.8f + (2.5f - 4.8f) * m
+        val ez = 10f + (4.8f - 10f) * m
+        val tz = -6f + 6f * m
+        Matrix.setLookAtM(view, 0, cx, ey, ez, cx, 1.2f, tz, 0f, 1f, 0f)
         Matrix.multiplyMM(vp, 0, proj, 0, view, 0)
 
         drawWorld()
@@ -263,54 +268,91 @@ class GameRenderer(private val game: Game) : GLSurfaceView.Renderer {
         }
         val spin = (game.time * 200f) % 360f
         for (c in game.coins) {
-            part(I, C_GOLD, 0.6f, 0.6f, 0.12f, px = c.lane * Game.LANE_W, py = 1f, pz = c.z, ry = spin)
+            part(I, C_GOLD, 0.6f, 0.6f, 0.12f, px = c.x, py = 1f, pz = c.z, ry = spin)
+        }
+        for (p in game.pickups) drawPickup(p)
+    }
+
+    private fun drawPickup(p: Pickup) {
+        val pb = pickBase
+        Matrix.setIdentityM(pb, 0)
+        val y = 1.3f + sin(game.time * 3f + p.z * 0.1f) * 0.15f
+        Matrix.translateM(pb, 0, p.lane * Game.LANE_W, y, p.z)
+        Matrix.rotateM(pb, 0, (game.time * 120f) % 360f, 0f, 1f, 0f)
+        when (p.kind) {
+            Game.MAGNET -> {
+                part(pb, C_MAG, 0.2f, 0.7f, 0.25f, px = -0.28f)
+                part(pb, C_MAG, 0.2f, 0.7f, 0.25f, px = 0.28f)
+                part(pb, C_MAG, 0.76f, 0.2f, 0.25f, py = -0.28f)
+                part(pb, C_WHITE, 0.2f, 0.18f, 0.25f, px = -0.28f, py = 0.4f)
+                part(pb, C_WHITE, 0.2f, 0.18f, 0.25f, px = 0.28f, py = 0.4f)
+            }
+            Game.SHIELD -> {
+                part(pb, C_SHIELD, 0.7f, 0.8f, 0.25f)
+                part(pb, C_SHIELD_L, 0.4f, 0.45f, 0.3f)
+            }
+            else -> {
+                part(pb, C_X2, 0.7f, 0.7f, 0.4f)
+                part(pb, C_GOLD, 0.3f, 0.3f, 0.45f)
+            }
         }
     }
 
     private fun drawPlayer() {
         val g = game
+        val sk = g.skin
         val s = 1f / (1f + g.py * 0.35f)
         part(I, C_SHADOW, 0.9f * s, 0.02f, 0.9f * s, px = g.px, py = 0.02f)
 
-        val b = playerBase
-        Matrix.setIdentityM(b, 0)
-        Matrix.translateM(b, 0, g.px, g.py, 0f)
-        if (g.slideBlend > 0.01f) Matrix.rotateM(b, 0, -78f * g.slideBlend, 1f, 0f, 0f)
-        if (g.deadBlend > 0.01f) Matrix.rotateM(b, 0, 85f * g.deadBlend, 1f, 0f, 0f)
+        // shield එකෙන් පස්සේ තත්පරයක් blink වෙනවා
+        val blinkHidden = g.invT > 0f && ((g.time * 14f).toInt() and 1) == 0
 
-        var sw = if (g.state == Game.READY) sin(g.time * 3f) * 6f else sin(g.runT) * 48f
-        var legL = sw
-        var legR = -sw
-        var armL = -sw
-        var armR = sw
-        if (g.py > 0.05f) {          // අහසේ ඉන්නකොට
-            legL = 40f; legR = -25f
-            armL = 150f; armR = 150f
+        if (!blinkHidden) {
+            val b = playerBase
+            Matrix.setIdentityM(b, 0)
+            Matrix.translateM(b, 0, g.px, g.py, 0f)
+            if (g.state == Game.READY) Matrix.rotateM(b, 0, g.preview, 0f, 1f, 0f)
+            if (g.slideBlend > 0.01f) Matrix.rotateM(b, 0, -78f * g.slideBlend, 1f, 0f, 0f)
+            if (g.deadBlend > 0.01f) Matrix.rotateM(b, 0, 85f * g.deadBlend, 1f, 0f, 0f)
+
+            val sw = if (g.state == Game.READY) sin(g.time * 3f) * 6f else sin(g.runT) * 48f
+            var legL = sw
+            var legR = -sw
+            var armL = -sw
+            var armR = sw
+            if (g.py > 0.05f) {
+                legL = 40f; legR = -25f
+                armL = 150f; armR = 150f
+            }
+            if (g.state == Game.DEAD) {
+                legL = 10f; legR = -10f; armL = 30f; armR = -30f
+            }
+
+            part(b, sk.pants, 0.3f, 0.8f, 0.32f, px = -0.17f, py = 0.95f, rx = legL, oy = -0.4f)
+            part(b, sk.shoe, 0.32f, 0.2f, 0.45f, px = -0.17f, py = 0.95f, rx = legL, oy = -0.85f, oz = -0.06f)
+            part(b, sk.pants, 0.3f, 0.8f, 0.32f, px = 0.17f, py = 0.95f, rx = legR, oy = -0.4f)
+            part(b, sk.shoe, 0.32f, 0.2f, 0.45f, px = 0.17f, py = 0.95f, rx = legR, oy = -0.85f, oz = -0.06f)
+
+            part(b, sk.shirt, 0.74f, 0.72f, 0.42f, py = 1.3f)
+            part(b, sk.pack, 0.5f, 0.55f, 0.22f, py = 1.3f, pz = 0.31f)
+
+            part(b, sk.shirt, 0.2f, 0.45f, 0.24f, px = -0.48f, py = 1.6f, rx = armL, oy = -0.225f)
+            part(b, sk.skin, 0.18f, 0.3f, 0.2f, px = -0.48f, py = 1.6f, rx = armL, oy = -0.6f)
+            part(b, sk.shirt, 0.2f, 0.45f, 0.24f, px = 0.48f, py = 1.6f, rx = armR, oy = -0.225f)
+            part(b, sk.skin, 0.18f, 0.3f, 0.2f, px = 0.48f, py = 1.6f, rx = armR, oy = -0.6f)
+
+            part(b, sk.skin, 0.5f, 0.5f, 0.5f, py = 1.92f)
+            part(b, sk.hair, 0.54f, 0.2f, 0.54f, py = 2.16f)
+            part(b, sk.hair, 0.54f, 0.36f, 0.1f, py = 1.98f, pz = 0.22f)
+            part(b, sk.band, 0.55f, 0.07f, 0.55f, py = 2.05f)
         }
-        if (g.state == Game.DEAD) {
-            legL = 10f; legR = -10f; armL = 30f; armR = -30f
+
+        // shield bubble (පාරදෘශ්‍ය) : අන්තිමට අඳිනවා
+        if (g.shieldT > 0f && g.state == Game.RUNNING) {
+            val a = if (g.shieldT < 2f) 0.12f + 0.16f * ((g.time * 10f).toInt() and 1) else 0.28f
+            GLES20.glDepthMask(false)
+            part(I, C_SHIELD_L, 1.9f, 2.7f, 1.9f, px = g.px, py = g.py + 1.15f, a = a)
+            GLES20.glDepthMask(true)
         }
-
-        // කකුල් + සපත්තු
-        part(b, C_PANTS, 0.3f, 0.8f, 0.32f, px = -0.17f, py = 0.95f, rx = legL, oy = -0.4f)
-        part(b, C_SHOE, 0.32f, 0.2f, 0.45f, px = -0.17f, py = 0.95f, rx = legL, oy = -0.85f, oz = -0.06f)
-        part(b, C_PANTS, 0.3f, 0.8f, 0.32f, px = 0.17f, py = 0.95f, rx = legR, oy = -0.4f)
-        part(b, C_SHOE, 0.32f, 0.2f, 0.45f, px = 0.17f, py = 0.95f, rx = legR, oy = -0.85f, oz = -0.06f)
-
-        // ශරීරය + බෑගය
-        part(b, C_SHIRT, 0.74f, 0.72f, 0.42f, py = 1.3f)
-        part(b, C_PACK, 0.5f, 0.55f, 0.22f, py = 1.3f, pz = 0.31f)
-
-        // අත්
-        part(b, C_SHIRT, 0.2f, 0.45f, 0.24f, px = -0.48f, py = 1.6f, rx = armL, oy = -0.225f)
-        part(b, C_SKIN, 0.18f, 0.3f, 0.2f, px = -0.48f, py = 1.6f, rx = armL, oy = -0.6f)
-        part(b, C_SHIRT, 0.2f, 0.45f, 0.24f, px = 0.48f, py = 1.6f, rx = armR, oy = -0.225f)
-        part(b, C_SKIN, 0.18f, 0.3f, 0.2f, px = 0.48f, py = 1.6f, rx = armR, oy = -0.6f)
-
-        // හිස
-        part(b, C_SKIN, 0.5f, 0.5f, 0.5f, py = 1.92f)
-        part(b, C_HAIR, 0.54f, 0.2f, 0.54f, py = 2.16f)
-        part(b, C_HAIR, 0.54f, 0.36f, 0.1f, py = 1.98f, pz = 0.22f)
-        part(b, C_BAND, 0.55f, 0.07f, 0.55f, py = 2.05f)
     }
 }
