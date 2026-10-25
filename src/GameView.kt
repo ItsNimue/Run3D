@@ -15,7 +15,7 @@ class GameView(ctx: Context, sound: Sound, onHud: (Hud) -> Unit) : GLSurfaceView
     init {
         setEGLContextClientVersion(2)
         preserveEGLContextOnPause = true
-        setRenderer(GameRenderer(game))
+        setRenderer(GameRenderer(ctx, game))
         renderMode = RENDERMODE_CONTINUOUSLY
     }
 
