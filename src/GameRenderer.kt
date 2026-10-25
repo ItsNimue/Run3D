@@ -1,17 +1,37 @@
 package lk.maleemahi.run3d
 
+import android.content.Context
 import android.opengl.GLES20
 import android.opengl.GLSurfaceView
 import android.opengl.Matrix
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
-import java.nio.FloatBuffer
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
+import kotlin.math.abs
 import kotlin.math.floor
 import kotlin.math.sin
 
-class GameRenderer(private val game: Game) : GLSurfaceView.Renderer {
+class GameRenderer(private val ctx: Context, private val game: Game) : GLSurfaceView.Renderer {
+
+    // ---- ඔයාගේ models වලට අනුව වෙනස් කරන්න
+    private val PLAYER_YAW = 180f    // character මුහුණ ඉදිරිය (-Z) දිහාවට. මුහුණ පිටිපස්සට පෙනෙනවා නම් 0 කරන්න
+    private val PLAYER_SIZE = 2.2f   // character උස
+
+    private class Slot(val file: String, val size: Float, val byHeight: Boolean, val yaw: Float) {
+        var model: GlbModel? = null
+        var tried = false
+    }
+
+    private val slots = hashMapOf(
+        "player" to Slot("models/player.glb", PLAYER_SIZE, true, PLAYER_YAW),
+        "crate" to Slot("models/crate.glb", 1.9f, false, 0f),
+        "barrier" to Slot("models/barrier.glb", 2.4f, true, 0f),
+        "wall" to Slot("models/wall.glb", 2.6f, true, 0f),
+        "coin" to Slot("models/coin.glb", 0.7f, false, 0f),
+        "magnet" to Slot("models/magnet.glb", 0.9f, false, 0f),
+        "shield" to Slot("models/shield.glb", 0.9f, false, 0f),
+        "x2" to Slot("models/x2.glb", 0.9f, false, 0f),
+        "tree" to Slot("models/tree.glb", 3.8f, true, 0f)
+    )
 
     private val SKY = rgb(140, 205, 242)
     private val C_ROAD_A = rgb(92, 96, 108)
@@ -38,40 +58,55 @@ class GameRenderer(private val game: Game) : GLSurfaceView.Renderer {
     private val vertexSrc = """
         uniform mat4 uMVP;
         uniform mat4 uModel;
-        uniform vec3 uColor;
-        uniform vec3 uFog;
         attribute vec3 aPos;
         attribute vec3 aNormal;
-        varying vec3 vColor;
+        attribute vec2 aUV;
+        varying float vLight;
+        varying float vFog;
+        varying vec2 vUV;
         void main() {
             gl_Position = uMVP * vec4(aPos, 1.0);
             vec3 n = normalize((uModel * vec4(aNormal, 0.0)).xyz);
             float l = max(dot(n, normalize(vec3(0.4, 1.0, 0.6))), 0.0);
-            vec3 c = uColor * (0.45 + 0.6 * l);
-            float f = clamp((gl_Position.w - 35.0) / 55.0, 0.0, 1.0);
-            vColor = mix(c, uFog, f);
+            vLight = 0.45 + 0.6 * l;
+            vFog = clamp((gl_Position.w - 35.0) / 55.0, 0.0, 1.0);
+            vUV = aUV;
         }
     """.trimIndent()
 
     private val fragmentSrc = """
         precision mediump float;
+        uniform vec3 uColor;
+        uniform vec3 uFog;
         uniform float uAlpha;
-        varying vec3 vColor;
+        uniform float uUseTex;
+        uniform sampler2D uTex;
+        varying float vLight;
+        varying float vFog;
+        varying vec2 vUV;
         void main() {
-            gl_FragColor = vec4(vColor, uAlpha);
+            vec3 base = uColor;
+            if (uUseTex > 0.5) {
+                base = texture2D(uTex, vUV).rgb * uColor;
+            }
+            gl_FragColor = vec4(mix(base * vLight, uFog, vFog), uAlpha);
         }
     """.trimIndent()
 
     private var prog = 0
     private var aPos = 0
     private var aNormal = 0
+    private var aUV = 0
     private var uMVP = 0
     private var uModel = 0
     private var uColor = 0
     private var uFog = 0
     private var uAlpha = 0
+    private var uUseTex = 0
+    private var uTex = 0
 
-    private lateinit var cube: FloatBuffer
+    private var cubeVbo = 0
+    private var boundVbo = -1
 
     private val proj = FloatArray(16)
     private val view = FloatArray(16)
@@ -100,15 +135,25 @@ class GameRenderer(private val game: Game) : GLSurfaceView.Renderer {
 
         aPos = GLES20.glGetAttribLocation(prog, "aPos")
         aNormal = GLES20.glGetAttribLocation(prog, "aNormal")
+        aUV = GLES20.glGetAttribLocation(prog, "aUV")
         uMVP = GLES20.glGetUniformLocation(prog, "uMVP")
         uModel = GLES20.glGetUniformLocation(prog, "uModel")
         uColor = GLES20.glGetUniformLocation(prog, "uColor")
         uFog = GLES20.glGetUniformLocation(prog, "uFog")
         uAlpha = GLES20.glGetUniformLocation(prog, "uAlpha")
+        uUseTex = GLES20.glGetUniformLocation(prog, "uUseTex")
+        uTex = GLES20.glGetUniformLocation(prog, "uTex")
 
         GLES20.glEnableVertexAttribArray(aPos)
         GLES20.glEnableVertexAttribArray(aNormal)
-        cube = buildCube()
+        GLES20.glEnableVertexAttribArray(aUV)
+        GLES20.glUniform1i(uTex, 0)
+
+        cubeVbo = uploadVbo(buildCube())
+        boundVbo = -1
+
+        // ඇති models ඔක්කොම මුලින්ම load කරනවා (නැති ඒවා cube විදිහට)
+        for (k in slots.keys.toList()) model(k)
         last = System.nanoTime()
     }
 
@@ -124,7 +169,7 @@ class GameRenderer(private val game: Game) : GLSurfaceView.Renderer {
         return s
     }
 
-    private fun buildCube(): FloatBuffer {
+    private fun buildCube(): FloatArray {
         val a = 0.5f
         val b = -0.5f
         val faces = arrayOf(
@@ -136,7 +181,7 @@ class GameRenderer(private val game: Game) : GLSurfaceView.Renderer {
             floatArrayOf(0f, -1f, 0f, b, b, b, a, b, b, a, b, a, b, b, a)
         )
         val idx = intArrayOf(0, 1, 2, 0, 2, 3)
-        val arr = FloatArray(6 * 6 * 6)
+        val arr = FloatArray(6 * 6 * 8)
         var k = 0
         for (f in faces) {
             for (i in idx) {
@@ -146,15 +191,77 @@ class GameRenderer(private val game: Game) : GLSurfaceView.Renderer {
                 arr[k++] = f[0]
                 arr[k++] = f[1]
                 arr[k++] = f[2]
+                arr[k++] = 0f
+                arr[k++] = 0f
             }
         }
-        val fb = ByteBuffer.allocateDirect(arr.size * 4).order(ByteOrder.nativeOrder()).asFloatBuffer()
-        fb.put(arr)
-        fb.position(0)
-        return fb
+        return arr
     }
 
-    /** model = base * T(p) * Ry * Rx * T(o) * S */
+    // ------------------------------------------------------------ models
+    private fun model(key: String): GlbModel? {
+        val s = slots[key] ?: return null
+        if (!s.tried) {
+            s.tried = true
+            s.model = GlbModel.load(ctx, s.file, s.size, s.byHeight)
+            boundVbo = -1
+        }
+        return s.model
+    }
+
+    /** skin එකට වෙනම model එකක් (player_N.glb) තියෙනවා නම් ඒක, නැත්නම් player.glb */
+    private fun playerModel(skin: Int): GlbModel? {
+        val k = "player_$skin"
+        if (!slots.containsKey(k)) slots[k] = Slot("models/player_$skin.glb", PLAYER_SIZE, true, PLAYER_YAW)
+        return model(k) ?: model("player")
+    }
+
+    private fun bindVbo(vbo: Int) {
+        if (boundVbo == vbo) return
+        boundVbo = vbo
+        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vbo)
+        GLES20.glVertexAttribPointer(aPos, 3, GLES20.GL_FLOAT, false, 32, 0)
+        GLES20.glVertexAttribPointer(aNormal, 3, GLES20.GL_FLOAT, false, 32, 12)
+        GLES20.glVertexAttribPointer(aUV, 2, GLES20.GL_FLOAT, false, 32, 24)
+    }
+
+    private fun drawModel(
+        m: GlbModel, base: FloatArray, px: Float, py: Float, pz: Float, yaw: Float,
+        rx: Float = 0f, rz: Float = 0f, sx: Float = 1f, sy: Float = 1f, sz: Float = 1f,
+        a: Float = 1f
+    ) {
+        System.arraycopy(base, 0, model, 0, 16)
+        Matrix.translateM(model, 0, px, py, pz)
+        if (yaw != 0f) Matrix.rotateM(model, 0, yaw, 0f, 1f, 0f)
+        if (rz != 0f) Matrix.rotateM(model, 0, rz, 0f, 0f, 1f)
+        if (rx != 0f) Matrix.rotateM(model, 0, rx, 1f, 0f, 0f)
+        Matrix.scaleM(model, 0, sx, sy, sz)
+        Matrix.multiplyMM(mvp, 0, vp, 0, model, 0)
+        GLES20.glUniformMatrix4fv(uMVP, 1, false, mvp, 0)
+        GLES20.glUniformMatrix4fv(uModel, 1, false, model, 0)
+        GLES20.glUniform1f(uAlpha, a)
+        for (p in m.prims) {
+            bindVbo(p.vbo)
+            if (p.tex != 0) {
+                GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, p.tex)
+                GLES20.glUniform1f(uUseTex, 1f)
+            } else {
+                GLES20.glUniform1f(uUseTex, 0f)
+            }
+            GLES20.glUniform3f(uColor, p.color[0], p.color[1], p.color[2])
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, p.count)
+        }
+    }
+
+    /** slot එකේ model එක තියෙනවා නම් අඳිනවා (true), නැත්නම් false (cube fallback එකට) */
+    private fun drawSlot(key: String, px: Float, py: Float, pz: Float, spin: Float = 0f, scale: Float = 1f): Boolean {
+        val m = model(key) ?: return false
+        drawModel(m, I, px, py, pz, slots[key]!!.yaw + spin, sx = scale, sy = scale, sz = scale)
+        return true
+    }
+
+    /** model = base * T(p) * Ry * Rx * T(o) * S : cube එකක් */
     private fun part(
         base: FloatArray, c: FloatArray, sx: Float, sy: Float, sz: Float,
         px: Float = 0f, py: Float = 0f, pz: Float = 0f,
@@ -173,9 +280,12 @@ class GameRenderer(private val game: Game) : GLSurfaceView.Renderer {
         GLES20.glUniformMatrix4fv(uModel, 1, false, model, 0)
         GLES20.glUniform3f(uColor, c[0], c[1], c[2])
         GLES20.glUniform1f(uAlpha, a)
+        GLES20.glUniform1f(uUseTex, 0f)
+        bindVbo(cubeVbo)
         GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, 36)
     }
 
+    // ------------------------------------------------------------- frame
     override fun onDrawFrame(gl: GL10?) {
         val now = System.nanoTime()
         var dt = (now - last) / 1e9f
@@ -187,12 +297,6 @@ class GameRenderer(private val game: Game) : GLSurfaceView.Renderer {
         GLES20.glUseProgram(prog)
         GLES20.glUniform3f(uFog, SKY[0], SKY[1], SKY[2])
 
-        cube.position(0)
-        GLES20.glVertexAttribPointer(aPos, 3, GLES20.GL_FLOAT, false, 24, cube)
-        cube.position(3)
-        GLES20.glVertexAttribPointer(aNormal, 3, GLES20.GL_FLOAT, false, 24, cube)
-
-        // menu එකේදී camera එක character ළඟට එනවා
         val m = game.menuT
         val cx = game.px * 0.45f * (1f - m)
         val ey = 4.8f + (2.5f - 4.8f) * m
@@ -238,6 +342,8 @@ class GameRenderer(private val game: Game) : GLSurfaceView.Renderer {
     }
 
     private fun tree(x: Float, z: Float, seed: Int) {
+        val sc = 0.8f + (seed and 3) * 0.15f
+        if (drawSlot("tree", x, 0f, z, spin = (seed and 7) * 45f, scale = sc)) return
         val big = 1f + (seed and 3) * 0.25f
         part(I, C_TRUNK, 0.5f, 1.6f * big, 0.5f, px = x, py = 0.8f * big, pz = z)
         part(
@@ -250,17 +356,17 @@ class GameRenderer(private val game: Game) : GLSurfaceView.Renderer {
         for (o in game.obstacles) {
             val x = o.lane * Game.LANE_W
             when (o.type) {
-                Game.LOW -> {
+                Game.LOW -> if (!drawSlot("crate", x, 0f, o.z)) {
                     part(I, C_CRATE, 1.8f, 0.9f, 1f, px = x, py = 0.45f, pz = o.z)
                     part(I, C_CRATE_TOP, 1.9f, 0.12f, 1.1f, px = x, py = 0.93f, pz = o.z)
                 }
-                Game.HIGH -> {
+                Game.HIGH -> if (!drawSlot("barrier", x, 0f, o.z)) {
                     part(I, C_POST, 0.2f, 2.4f, 0.2f, px = x - 0.9f, py = 1.2f, pz = o.z)
                     part(I, C_POST, 0.2f, 2.4f, 0.2f, px = x + 0.9f, py = 1.2f, pz = o.z)
                     part(I, C_BAR, 2f, 0.7f, 0.3f, px = x, py = 1.75f, pz = o.z)
                     part(I, C_WHITE, 2f, 0.18f, 0.04f, px = x, py = 1.75f, pz = o.z + 0.16f)
                 }
-                else -> {
+                else -> if (!drawSlot("wall", x, 0f, o.z)) {
                     part(I, C_WALL, 1.9f, 2.6f, 0.9f, px = x, py = 1.3f, pz = o.z)
                     part(I, C_WALL_TOP, 2f, 0.1f, 1f, px = x, py = 2.65f, pz = o.z)
                 }
@@ -268,17 +374,24 @@ class GameRenderer(private val game: Game) : GLSurfaceView.Renderer {
         }
         val spin = (game.time * 200f) % 360f
         for (c in game.coins) {
-            part(I, C_GOLD, 0.6f, 0.6f, 0.12f, px = c.x, py = 1f, pz = c.z, ry = spin)
+            if (!drawSlot("coin", c.x, 0.65f, c.z, spin = spin)) {
+                part(I, C_GOLD, 0.6f, 0.6f, 0.12f, px = c.x, py = 1f, pz = c.z, ry = spin)
+            }
         }
         for (p in game.pickups) drawPickup(p)
     }
 
     private fun drawPickup(p: Pickup) {
+        val x = p.lane * Game.LANE_W
+        val y = 1.3f + sin(game.time * 3f + p.z * 0.1f) * 0.15f
+        val spin = (game.time * 120f) % 360f
+        val key = when (p.kind) { Game.MAGNET -> "magnet"; Game.SHIELD -> "shield"; else -> "x2" }
+        if (drawSlot(key, x, y - 0.45f, p.z, spin = spin)) return
+
         val pb = pickBase
         Matrix.setIdentityM(pb, 0)
-        val y = 1.3f + sin(game.time * 3f + p.z * 0.1f) * 0.15f
-        Matrix.translateM(pb, 0, p.lane * Game.LANE_W, y, p.z)
-        Matrix.rotateM(pb, 0, (game.time * 120f) % 360f, 0f, 1f, 0f)
+        Matrix.translateM(pb, 0, x, y, p.z)
+        Matrix.rotateM(pb, 0, spin, 0f, 1f, 0f)
         when (p.kind) {
             Game.MAGNET -> {
                 part(pb, C_MAG, 0.2f, 0.7f, 0.25f, px = -0.28f)
@@ -304,7 +417,6 @@ class GameRenderer(private val game: Game) : GLSurfaceView.Renderer {
         val s = 1f / (1f + g.py * 0.35f)
         part(I, C_SHADOW, 0.9f * s, 0.02f, 0.9f * s, px = g.px, py = 0.02f)
 
-        // shield එකෙන් පස්සේ තත්පරයක් blink වෙනවා
         val blinkHidden = g.invT > 0f && ((g.time * 14f).toInt() and 1) == 0
 
         if (!blinkHidden) {
@@ -315,44 +427,58 @@ class GameRenderer(private val game: Game) : GLSurfaceView.Renderer {
             if (g.slideBlend > 0.01f) Matrix.rotateM(b, 0, -78f * g.slideBlend, 1f, 0f, 0f)
             if (g.deadBlend > 0.01f) Matrix.rotateM(b, 0, 85f * g.deadBlend, 1f, 0f, 0f)
 
-            val sw = if (g.state == Game.READY) sin(g.time * 3f) * 6f else sin(g.runT) * 48f
-            var legL = sw
-            var legR = -sw
-            var armL = -sw
-            var armR = sw
-            if (g.py > 0.05f) {
-                legL = 40f; legR = -25f
-                armL = 150f; armR = 150f
+            val pm = playerModel(g.skinIndex)
+            if (pm != null) {
+                // model එක: animation නැතුව bounce + lean + tilt වලින් ජීවය දෙනවා
+                val running = g.state == Game.RUNNING && g.py <= 0.05f && g.slideBlend < 0.3f
+                val bob = if (running) abs(sin(g.runT)) * 0.14f else 0f
+                val lean = if (g.state == Game.RUNNING && g.slideBlend < 0.3f) -8f else 0f
+                val roll = if (g.state == Game.RUNNING) -(g.lane * Game.LANE_W - g.px) * 6f else 0f
+                val breathe = if (g.state == Game.READY) 1f + sin(g.time * 2f) * 0.012f else 1f
+                drawModel(pm, b, 0f, bob, 0f, slots["player"]!!.yaw, rx = lean, rz = roll, sy = breathe)
+            } else {
+                drawCubePlayer(b, g, sk)
             }
-            if (g.state == Game.DEAD) {
-                legL = 10f; legR = -10f; armL = 30f; armR = -30f
-            }
-
-            part(b, sk.pants, 0.3f, 0.8f, 0.32f, px = -0.17f, py = 0.95f, rx = legL, oy = -0.4f)
-            part(b, sk.shoe, 0.32f, 0.2f, 0.45f, px = -0.17f, py = 0.95f, rx = legL, oy = -0.85f, oz = -0.06f)
-            part(b, sk.pants, 0.3f, 0.8f, 0.32f, px = 0.17f, py = 0.95f, rx = legR, oy = -0.4f)
-            part(b, sk.shoe, 0.32f, 0.2f, 0.45f, px = 0.17f, py = 0.95f, rx = legR, oy = -0.85f, oz = -0.06f)
-
-            part(b, sk.shirt, 0.74f, 0.72f, 0.42f, py = 1.3f)
-            part(b, sk.pack, 0.5f, 0.55f, 0.22f, py = 1.3f, pz = 0.31f)
-
-            part(b, sk.shirt, 0.2f, 0.45f, 0.24f, px = -0.48f, py = 1.6f, rx = armL, oy = -0.225f)
-            part(b, sk.skin, 0.18f, 0.3f, 0.2f, px = -0.48f, py = 1.6f, rx = armL, oy = -0.6f)
-            part(b, sk.shirt, 0.2f, 0.45f, 0.24f, px = 0.48f, py = 1.6f, rx = armR, oy = -0.225f)
-            part(b, sk.skin, 0.18f, 0.3f, 0.2f, px = 0.48f, py = 1.6f, rx = armR, oy = -0.6f)
-
-            part(b, sk.skin, 0.5f, 0.5f, 0.5f, py = 1.92f)
-            part(b, sk.hair, 0.54f, 0.2f, 0.54f, py = 2.16f)
-            part(b, sk.hair, 0.54f, 0.36f, 0.1f, py = 1.98f, pz = 0.22f)
-            part(b, sk.band, 0.55f, 0.07f, 0.55f, py = 2.05f)
         }
 
-        // shield bubble (පාරදෘශ්‍ය) : අන්තිමට අඳිනවා
         if (g.shieldT > 0f && g.state == Game.RUNNING) {
             val a = if (g.shieldT < 2f) 0.12f + 0.16f * ((g.time * 10f).toInt() and 1) else 0.28f
             GLES20.glDepthMask(false)
             part(I, C_SHIELD_L, 1.9f, 2.7f, 1.9f, px = g.px, py = g.py + 1.15f, a = a)
             GLES20.glDepthMask(true)
         }
+    }
+
+    private fun drawCubePlayer(b: FloatArray, g: Game, sk: Skin) {
+        val sw = if (g.state == Game.READY) sin(g.time * 3f) * 6f else sin(g.runT) * 48f
+        var legL = sw
+        var legR = -sw
+        var armL = -sw
+        var armR = sw
+        if (g.py > 0.05f) {
+            legL = 40f; legR = -25f
+            armL = 150f; armR = 150f
+        }
+        if (g.state == Game.DEAD) {
+            legL = 10f; legR = -10f; armL = 30f; armR = -30f
+        }
+
+        part(b, sk.pants, 0.3f, 0.8f, 0.32f, px = -0.17f, py = 0.95f, rx = legL, oy = -0.4f)
+        part(b, sk.shoe, 0.32f, 0.2f, 0.45f, px = -0.17f, py = 0.95f, rx = legL, oy = -0.85f, oz = -0.06f)
+        part(b, sk.pants, 0.3f, 0.8f, 0.32f, px = 0.17f, py = 0.95f, rx = legR, oy = -0.4f)
+        part(b, sk.shoe, 0.32f, 0.2f, 0.45f, px = 0.17f, py = 0.95f, rx = legR, oy = -0.85f, oz = -0.06f)
+
+        part(b, sk.shirt, 0.74f, 0.72f, 0.42f, py = 1.3f)
+        part(b, sk.pack, 0.5f, 0.55f, 0.22f, py = 1.3f, pz = 0.31f)
+
+        part(b, sk.shirt, 0.2f, 0.45f, 0.24f, px = -0.48f, py = 1.6f, rx = armL, oy = -0.225f)
+        part(b, sk.skin, 0.18f, 0.3f, 0.2f, px = -0.48f, py = 1.6f, rx = armL, oy = -0.6f)
+        part(b, sk.shirt, 0.2f, 0.45f, 0.24f, px = 0.48f, py = 1.6f, rx = armR, oy = -0.225f)
+        part(b, sk.skin, 0.18f, 0.3f, 0.2f, px = 0.48f, py = 1.6f, rx = armR, oy = -0.6f)
+
+        part(b, sk.skin, 0.5f, 0.5f, 0.5f, py = 1.92f)
+        part(b, sk.hair, 0.54f, 0.2f, 0.54f, py = 2.16f)
+        part(b, sk.hair, 0.54f, 0.36f, 0.1f, py = 1.98f, pz = 0.22f)
+        part(b, sk.band, 0.55f, 0.07f, 0.55f, py = 2.05f)
     }
 }
